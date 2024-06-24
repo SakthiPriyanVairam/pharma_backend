@@ -1,15 +1,28 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from flask_marshmallow import Marshmallow
 from datetime import datetime
 from flask_migrate import Migrate
 from flask_cors import CORS  
 from marshmallow import Schema, fields
+import os
+from werkzeug.utils import secure_filename
+
+
+
+
 
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///pharma.db' 
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+UPLOAD_FOLDER = 'uploads/'
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['MAX_CONTENT_PATH'] = 16 * 1024 * 1024  # Limit file size to 16MB
+
+
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
 
 db = SQLAlchemy(app)
 ma = Marshmallow(app)
@@ -19,18 +32,28 @@ migrate = Migrate(app, db)
 
 CORS(app)
 
+# Allowed file extensions
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
 # Business model
 class Business(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=False)
+    name = db.Column(db.String(100), unique=True, nullable=False)
     address = db.Column(db.String(200))
     gst_no = db.Column(db.String(50))
     phone_number = db.Column(db.String(20))
-    logo = db.Column(db.String(200))  # Assuming URL or path to the logo
     dl_no = db.Column(db.String(50))
     email_id = db.Column(db.String(100))
+
+class Logo(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    # business_id = db.Column(db.Integer, db.ForeignKey('business.id'), nullable=False)
+    filename = db.Column(db.String(100), nullable=False)
+    path = db.Column(db.String(200), nullable=False)
 
 # Business schema
 class BusinessSchema(ma.Schema):
@@ -39,7 +62,6 @@ class BusinessSchema(ma.Schema):
     address = fields.Str()
     gst_no = fields.Str()
     phone_number = fields.Str()
-    logo = fields.Str()
     dl_no = fields.Str()
     email_id = fields.Str()
 
@@ -249,55 +271,102 @@ invoices_schema = InvoiceSchema(many=True)
 transaction_schema = TransactionSchema()
 transactions_schema = TransactionSchema(many=True)
 
-# API endpoints for Business
 @app.route('/api/business', methods=['POST'])
-def create_business():
-    data = request.json
+def add_business():
+    data = request.get_json()
     new_business = Business(
         name=data['name'],
-        address=data.get('address', ''),
-        gst_no=data.get('gst_no', ''),
-        phone_number=data.get('phone_number', ''),
-        logo=data.get('logo', ''),
-        dl_no=data.get('dl_no', ''),
-        email_id=data.get('email_id', '')
+        address=data['address'],
+        gst_no=data['gst_no'],
+        phone_number=data['phone_number'],
+        dl_no=data['dl_no'],
+        email_id=data['email_id']
     )
     db.session.add(new_business)
     db.session.commit()
-    return business_schema.jsonify(new_business), 201
+    return jsonify({'message': 'Business added successfully'}), 201
 
+# Endpoint to get business information
 @app.route('/api/business', methods=['GET'])
-def get_businesses():
-    all_businesses = Business.query.all()
-    return jsonify(businesses_schema.dump(all_businesses))
+def get_all_businesses():
+    businesses = Business.query.all()
+    business_list = []
+    for business in businesses:
+        business_info = {
+            'name': business.name,
+            'address': business.address,
+            'gst_no': business.gst_no,
+            'phone_number': business.phone_number,
+            'dl_no': business.dl_no,
+            'email_id': business.email_id
+        }
+        business_list.append(business_info)
+    return jsonify(business_list), 200
 
-@app.route('/api/business/<int:id>', methods=['GET'])
-def get_business(id):
-    business = Business.query.get_or_404(id)
-    return business_schema.jsonify(business)
+# Endpoint to delete a business
 
-@app.route('/api/business/<int:id>', methods=['PUT'])
-def update_business(id):
-    business = Business.query.get_or_404(id)
-    data = request.json
-    business.name = data.get('name', business.name)
-    business.address = data.get('address', business.address)
-    business.gst_no = data.get('gst_no', business.gst_no)
-    business.phone_number = data.get('phone_number', business.phone_number)
-    business.logo = data.get('logo', business.logo)
-    business.dl_no = data.get('dl_no', business.dl_no)
-    business.email_id = data.get('email_id', business.email_id)
+@app.route('/api/business', methods=['DELETE'])
+def delete_all_businesses():
+    try:
+        businesses = Business.query.all()
+        for business in businesses:
+            db.session.delete(business)
+        
+        # Commit all deletions to the database
+        db.session.commit()
+        
+        return jsonify({'message': 'All businesses deleted successfully'}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/logo/upload', methods=['POST'])
+def upload_logo():
+    
+    file = request.files['file']
+ 
+    filename = secure_filename(file.filename)
+    file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+    
+    new_logo = Logo(
+        
+        filename=filename,
+        path=os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    )
+    db.session.add(new_logo)
     db.session.commit()
-    return business_schema.jsonify(business)
+    
+    return jsonify({'message': 'Logo uploaded successfully'}), 201
 
-@app.route('/api/business/<int:id>', methods=['DELETE'])
-def delete_business(id):
-    business = Business.query.get_or_404(id)
-    db.session.delete(business)
-    db.session.commit()
-    return jsonify({'message': 'Business deleted successfully'})
+@app.route('/api/logo/delete', methods=['DELETE'])
+def delete_all_logos():
+    try:
+        logos = Logo.query.all()
+        for logo in logos:
+            if os.path.exists(logo.path):
+                os.remove(logo.path)
+                
+                db.session.delete(logo)
+        
+        db.session.commit()
+        
+        return jsonify({'message': 'All logos deleted successfully'}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
 
+@app.route('/api/logo', methods=['GET'])
+def get_logo():
+    logos = Logo.query.all()
+    logo = logos[0]
+    
+    if os.path.exists(logo.path):
+        return send_from_directory(app.config['UPLOAD_FOLDER'], logo.filename)
+    else:
+        return jsonify({'error': 'Logo file not found on the server'}), 404
 
+######################################################################################
 @app.route('/api/customers', methods=['POST'])
 def create_customer():
     data = request.json
@@ -344,7 +413,6 @@ def delete_customer(id):
     return jsonify({'message': 'Customer deleted successfully'})
 
 
-# Similar routes can be implemented for suppliers and products
 @app.route('/api/products', methods=['POST'])
 def create_product():
     data = request.json
@@ -353,19 +421,16 @@ def create_product():
     db.session.commit()
     return product_schema.jsonify(new_product), 201
 
-# API endpoint to get all products
 @app.route('/api/products', methods=['GET'])
 def get_products():
     all_products = Product.query.all()
     return jsonify(products_schema.dump(all_products))
 
-# API endpoint to get a specific product by ID
 @app.route('/api/products/<int:id>', methods=['GET'])
 def get_product(id):
     product = Product.query.get_or_404(id)
     return product_schema.jsonify(product)
 
-# API endpoint to update a product
 @app.route('/api/products/<int:id>', methods=['PUT'])
 def update_product(id):
     product = Product.query.get_or_404(id)
@@ -375,7 +440,6 @@ def update_product(id):
     db.session.commit()
     return product_schema.jsonify(product)
 
-# API endpoint to delete a product
 @app.route('/api/products/<int:id>', methods=['DELETE'])
 def delete_product(id):
     product = Product.query.get_or_404(id)
@@ -606,4 +670,6 @@ def delete_transaction(id):
     return jsonify({'message': 'Transaction deleted successfully'})
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    with app.app_context():
+        db.create_all()
+    app.run(debug=True,host='localhost')
